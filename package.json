@@ -1,0 +1,19 @@
+{
+  "name": "acorn-crossing",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Acorn Crossing — Winter Burrow-inspired hand-drawn pen-and-ink & watercolor woodland survival game",
+  "type": "module",
+  "scripts": {
+    "dev": "node --no-warnings scripts/dev-server.mjs",
+    "start": "node --no-warnings scripts/dev-server.mjs",
+    "build": "node --no-warnings scripts/build.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0"
+  },
+  "dependencies": {
+    "phaser": "^3.87.0"
+  }
+}
