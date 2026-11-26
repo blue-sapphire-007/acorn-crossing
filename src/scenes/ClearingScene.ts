@@ -55,11 +55,11 @@ interface FloatingLeaf {
 }
 
 const CLAUD_LINES = [
-  "Claud: \"Well I'll be — another acorn! Name's Claud. This old rubber boot keeps me dry as a seed.\"",
-  "Claud: \"Pinecone Lake's up north-west. Good water, but don't fall in — acorns float, but not gracefully.\"",
-  "Claud: \"Fog rolls thick past the meadows. Fly Maple Leaf up high and you'll see further.\"",
-  "Claud: \"Every so often a wagon comes creaking through the north-east woods. Sweetpea's, I reckon. Not this season, though.\"",
-  "Claud: \"Come by when the frost bites. A boot's cosier than you'd think.\""
+  "Claud: \"Well I'll be — a young sprout out this far! Name's Claud. I've lived in these woods for… well, who knows how long.\"",
+  "Claud: \"Used to be a craftsman and an adventurer myself, once upon a season. My old rubber boot keeps the damp right off my shell.\"",
+  "Claud: \"Pinecone Lake's up north-west. Good water, though don't tumble in — acorns float, just not with much dignity.\"",
+  "Claud: \"Fog rolls thick past the meadows. Fly Maple Leaf up high and you'll spot landmarks from much further off.\"",
+  "Claud: \"Come back when you're ready to build proper shelter — I still remember a trick or two for making useful things.\""
 ];
 
 export class ClearingScene implements Scene {
@@ -234,8 +234,8 @@ export class ClearingScene implements Scene {
       }
     }
 
-    // Claud lives in his rubber boot (lower-left woods)
-    this.props.push({ id: 'npc_claud', kind: 'npc', textureKey: 'npc_claud', x: POINTS.claud.x, y: POINTS.claud.y, displayHeight: 118, flipX: true, charges: 0, maxCharges: 0, respawnTimer: 0, label: 'Claud' });
+    // Claud lives in his rubber boot (lower-left woods); sprite faces left natively
+    this.props.push({ id: 'npc_claud', kind: 'npc', textureKey: 'npc_claud', x: POINTS.claud.x, y: POINTS.claud.y, displayHeight: 124, flipX: false, charges: 0, maxCharges: 0, respawnTimer: 0, label: 'Claud' });
 
     if (this.storyFlags.sweetpeaArrived) this.addSweetpeaProps();
   }
@@ -1024,8 +1024,8 @@ export class ClearingScene implements Scene {
     const tex = this.app.getTexture('acorn_idle');
     if (!tex) return;
 
-    // Tiny acorn height ~108px (with twig antlers) vs ~128px sparrow body (~2x acorn body mass)
-    const targetH = 108;
+    // Two-nut acorn-craft hero (~116px including twig antlers) vs ~132px sparrow body
+    const targetH = 116;
     const scale = targetH / tex.height;
     const dw = tex.width * scale;
     const dh = targetH;
