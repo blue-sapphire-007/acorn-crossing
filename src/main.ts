@@ -16,4 +16,6 @@ window.addEventListener('DOMContentLoaded', () => {
 
   app.startScene('BootScene');
   app.start();
+  // Debug handle for automated playtests (window.__acorn.app)
+  (window as unknown as { __acorn: unknown }).__acorn = { app };
 });

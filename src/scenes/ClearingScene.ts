@@ -4,10 +4,13 @@ import { InventorySystem, ITEMS } from '../systems/InventorySystem.ts';
 import type { ItemId } from '../systems/InventorySystem.ts';
 import { CraftingSystem, PHASE1_RECIPES } from '../systems/CraftingSystem.ts';
 import { StorybookHUD } from '../ui/StorybookHUD.ts';
+import { FogOfWar } from '../systems/FogOfWar.ts';
+import { CollageMap } from '../ui/CollageMap.ts';
+import { WORLD_W, WORLD_H, CELL_W, CELL_H, LANDMARKS, POINTS, WorldBackground, isWalkable, generateZoneSpawns } from '../world/WorldLayout.ts';
 
 interface WorldProp {
   id: string;
-  kind: 'forage' | 'scenery' | 'tent';
+  kind: 'forage' | 'scenery' | 'tent' | 'npc';
   itemType?: ItemId;
   textureKey: string;
   x: number;
@@ -18,6 +21,16 @@ interface WorldProp {
   maxCharges: number;
   respawnTimer: number;
   label?: string;
+}
+
+interface Hotspot {
+  id: string;
+  x: number;
+  y: number;
+  radius: number;
+  badge: string;
+  prompt: string;
+  onInteract: () => void;
 }
 
 interface DustParticle {
@@ -41,26 +54,37 @@ interface FloatingLeaf {
   scale: number;
 }
 
+const CLAUD_LINES = [
+  "Claud: \"Well I'll be — another acorn! Name's Claud. This old rubber boot keeps me dry as a seed.\"",
+  "Claud: \"Pinecone Lake's up north-west. Good water, but don't fall in — acorns float, but not gracefully.\"",
+  "Claud: \"Fog rolls thick past the meadows. Fly Maple Leaf up high and you'll see further.\"",
+  "Claud: \"Every so often a wagon comes creaking through the north-east woods. Sweetpea's, I reckon. Not this season, though.\"",
+  "Claud: \"Come by when the frost bites. A boot's cosier than you'd think.\""
+];
+
 export class ClearingScene implements Scene {
   public readonly key = 'ClearingScene';
   private app!: GameApp;
   private inventory!: InventorySystem;
   private crafting!: CraftingSystem;
   private hud!: StorybookHUD;
+  private background!: WorldBackground;
+  private fog!: FogOfWar;
+  private map!: CollageMap;
 
-  // Expanded playable world dimensions (panning smoothly with camera follow)
-  private readonly worldWidth: number = 1760;
-  private readonly worldHeight: number = 990;
+  // Expanded 3x3 playable world (home clearing in the centre)
+  private readonly worldWidth: number = WORLD_W;
+  private readonly worldHeight: number = WORLD_H;
 
   // Camera state
-  private camX: number = 880;
-  private camY: number = 540;
+  private camX: number = POINTS.playerStart.x;
+  private camY: number = POINTS.playerStart.y;
   private camZoom: number = 1.0;
 
   // Acorn protagonist state
   private player = {
-    x: 780,
-    y: 585,
+    x: POINTS.playerStart.x,
+    y: POINTS.playerStart.y,
     facingLeft: false,
     walkPhase: 0,
     isMoving: false,
@@ -74,8 +98,8 @@ export class ClearingScene implements Scene {
 
   // Maple Leaf (Chipping Sparrow companion) state
   private sparrow = {
-    x: 885,
-    y: 580,
+    x: POINTS.sparrowStart.x,
+    y: POINTS.sparrowStart.y,
     facingLeft: true,
     health: 100,
     maxHealth: 100,
@@ -98,8 +122,18 @@ export class ClearingScene implements Scene {
   private dust: DustParticle[] = [];
   private fallingLeaves: FloatingLeaf[] = [];
   private tentBuilt: boolean = false;
+  private tentPos: { x: number; y: number } | null = null;
   private toastMessage: string = '';
   private toastTimer: number = 0;
+  private sceneTime: number = 0;
+  private discovered: Set<string> = new Set(['home']);
+  private claudLineIndex: number = 0;
+  private hotspots: Hotspot[] = [];
+
+  /** Story progression flags. Sweetpea only arrives later in the game. */
+  private storyFlags = {
+    sweetpeaArrived: false
+  };
 
   public init(app: GameApp): void {
     this.app = app;
@@ -109,19 +143,34 @@ export class ClearingScene implements Scene {
     this.inventory = new InventorySystem();
     this.crafting = new CraftingSystem(this.inventory);
     this.hud = new StorybookHUD(this.app, this.inventory, this.crafting);
+    this.background = new WorldBackground(this.app);
+    this.fog = new FogOfWar();
+    this.map = new CollageMap(this.app);
 
     this.tentBuilt = false;
+    this.tentPos = null;
     this.props = [];
     this.dust = [];
     this.fallingLeaves = [];
+    this.discovered = new Set(['home']);
+    this.claudLineIndex = 0;
+
+    // Debug / later-chapter hook: ?sweetpea=1 brings the travelling wagon early
+    const params = new URLSearchParams(window.location.search);
+    this.storyFlags.sweetpeaArrived = params.get('sweetpea') === '1';
 
     this.populateClearing();
+    this.populateWorld();
+    this.buildHotspots();
 
-    // Gentle drifting autumn leaves across the canopy
+    // The home clearing is already known; the rest of the woods start under fog
+    this.fog.reveal(POINTS.playerStart.x + 100, POINTS.playerStart.y - 60, 760);
+
+    // Gentle drifting autumn leaves across the canopy (wrapped around the camera)
     for (let i = 0; i < 18; i++) {
       this.fallingLeaves.push({
-        x: Math.random() * this.worldWidth,
-        y: Math.random() * this.worldHeight,
+        x: this.camX + (Math.random() - 0.5) * 1800,
+        y: this.camY + (Math.random() - 0.5) * 1100,
         vx: 18 + Math.random() * 22,
         vy: 24 + Math.random() * 20,
         rot: Math.random() * Math.PI * 2,
@@ -130,10 +179,133 @@ export class ClearingScene implements Scene {
       });
     }
 
-    this.showToast('Welcome to the Autumn Clearing! Gather 2 Oak Leaves & 3 Sticks to build shelter.', 5.0);
+    this.showToast('Welcome to the Autumn Clearing! Gather 2 Oak Leaves & 3 Sticks to build shelter. Press [M] for your map.', 5.0);
   }
 
   public exit(): void {}
+
+  /** Called by later story beats (or ?sweetpea=1) to bring Sweetpea's wagon to her post. */
+  public arriveSweetpea(): void {
+    if (this.storyFlags.sweetpeaArrived) return;
+    this.storyFlags.sweetpeaArrived = true;
+    this.addSweetpeaProps();
+    this.buildHotspots();
+  }
+
+  private populateWorld(): void {
+    let n = 0;
+    for (const s of generateZoneSpawns()) {
+      n++;
+      if (s.itemType) {
+        const def: Record<string, { tex: string; h: number; charges: number; label: string }> = {
+          berry: { tex: 'berry_bush', h: 140, charges: 3, label: 'Woodland Berries' },
+          seed: { tex: 'seed_grass', h: 136, charges: 3, label: 'Golden Grass Seeds' },
+          leaf: { tex: 'oak_leaf', h: 62, charges: 1, label: 'Fallen Oak Leaf' },
+          stick: { tex: 'fallen_stick', h: 65, charges: 1, label: 'Dry Oak Stick' }
+        };
+        const d = def[s.itemType];
+        this.props.push({
+          id: `wild_${s.itemType}_${n}`,
+          kind: 'forage',
+          itemType: s.itemType,
+          textureKey: d.tex,
+          x: s.x,
+          y: s.y,
+          displayHeight: d.h * s.scale,
+          flipX: s.flipX,
+          charges: d.charges,
+          maxCharges: d.charges,
+          respawnTimer: 0,
+          label: d.label
+        });
+      } else if (s.scenery) {
+        this.props.push({
+          id: `wild_scenery_${n}`,
+          kind: 'scenery',
+          textureKey: s.scenery,
+          x: s.x,
+          y: s.y,
+          displayHeight: (s.scenery === 'mushroom_log' ? 125 : 142) * s.scale,
+          flipX: s.flipX,
+          charges: 0,
+          maxCharges: 0,
+          respawnTimer: 0
+        });
+      }
+    }
+
+    // Claud lives in his rubber boot (lower-left woods)
+    this.props.push({ id: 'npc_claud', kind: 'npc', textureKey: 'npc_claud', x: POINTS.claud.x, y: POINTS.claud.y, displayHeight: 118, flipX: true, charges: 0, maxCharges: 0, respawnTimer: 0, label: 'Claud' });
+
+    if (this.storyFlags.sweetpeaArrived) this.addSweetpeaProps();
+  }
+
+  private addSweetpeaProps(): void {
+    this.props.push({ id: 'sweetpea_wagon', kind: 'npc', textureKey: 'sweetpea_wagon', x: POINTS.wagon.x, y: POINTS.wagon.y, displayHeight: 230, charges: 0, maxCharges: 0, respawnTimer: 0, label: "Sweetpea's Wagon" });
+    this.props.push({ id: 'npc_sweetpea', kind: 'npc', textureKey: 'npc_sweetpea', x: POINTS.sweetpea.x, y: POINTS.sweetpea.y, displayHeight: 112, flipX: true, charges: 0, maxCharges: 0, respawnTimer: 0, label: 'Sweetpea' });
+  }
+
+  private buildHotspots(): void {
+    this.hotspots = [
+      {
+        id: 'oak_door', x: POINTS.oakDoor.x, y: POINTS.oakDoor.y, radius: 120, badge: '[E] Inspect',
+        prompt: 'Press [E] to inspect Ancient Oak Root Doorway',
+        onInteract: () => this.showToast('Ancient Oak Hollow Door: Sturdy winter housing upgrade (Chapter 2: Winter).')
+      },
+      {
+        id: 'claud', x: POINTS.claud.x, y: POINTS.claud.y, radius: 130, badge: '[E] Talk',
+        prompt: 'Press [E] to chat with Claud',
+        onInteract: () => {
+          this.app.audio.playSparrowChirp();
+          this.showToast(CLAUD_LINES[this.claudLineIndex % CLAUD_LINES.length], 5.5);
+          this.claudLineIndex++;
+        }
+      },
+      {
+        id: 'boot_door', x: POINTS.bootDoor.x, y: POINTS.bootDoor.y, radius: 95, badge: '[E] Knock',
+        prompt: "Press [E] to knock on Claud's boot door",
+        onInteract: () => this.showToast("Knock knock… Claud's cosy rubber boot. A bottle-cap path leads to the little wooden door.")
+      },
+      {
+        id: 'lake_shore', x: POINTS.lakeShore.x, y: POINTS.lakeShore.y, radius: 140, badge: '[E] Look',
+        prompt: 'Press [E] to gaze across Pinecone Lake',
+        onInteract: () => {
+          this.player.health = Math.min(this.player.maxHealth, this.player.health + 5);
+          this.showToast('Pinecone Lake: cool, still water ripples around giant floating pinecones. You take a refreshing sip (+5 Health).', 4.5);
+        }
+      }
+    ];
+
+    if (this.storyFlags.sweetpeaArrived) {
+      this.hotspots.push({
+        id: 'sweetpea', x: POINTS.sweetpea.x, y: POINTS.sweetpea.y, radius: 140, badge: '[E] Trade',
+        prompt: "Press [E] to browse Sweetpea's Traveling Post",
+        onInteract: () => {
+          this.app.audio.playCraftSuccess();
+          this.showToast('Sweetpea: "Welcome, welcome! Seeds, lanterns, thimbles of honey… my shelves are still being unpacked — trading opens soon!"', 5.5);
+        }
+      });
+    } else {
+      this.hotspots.push({
+        id: 'post_sign', x: POINTS.postSign.x, y: POINTS.postSign.y, radius: 130, badge: '[E] Read',
+        prompt: 'Press [E] to read the weathered signpost',
+        onInteract: () => this.showToast('"Sweetpea\'s Traveling Post — back when the leaves turn again!" Deep wagon ruts circle the empty clearing. Someone visits… sometimes.', 5.5)
+      });
+    }
+  }
+
+  private findNearestHotspot(): Hotspot | null {
+    let best: Hotspot | null = null;
+    let bestD = Infinity;
+    for (const h of this.hotspots) {
+      const d = Math.hypot(h.x - this.player.x, h.y - this.player.y);
+      if (d < h.radius && d < bestD) {
+        best = h;
+        bestD = d;
+      }
+    }
+    return best;
+  }
 
   private populateClearing(): void {
     // Rich hand-drawn forageable resources & 2.5D foreground/midground props for Y-depth sorting
@@ -167,7 +339,8 @@ export class ClearingScene implements Scene {
       { id: 'scenery_fern_2', kind: 'scenery', textureKey: 'forest_fern', x: 1245, y: 605, displayHeight: 140, flipX: true, charges: 0, maxCharges: 0 }
     ];
 
-    this.props = initialProps.map((p) => ({ ...p, respawnTimer: 0 }));
+    // Hand-placed coordinates are relative to the home clearing (centre cell of the 3x3 world)
+    this.props = initialProps.map((p) => ({ ...p, x: p.x + CELL_W, y: p.y + CELL_H, respawnTimer: 0 }));
   }
 
   private showToast(msg: string, duration: number = 3.2): void {
@@ -176,9 +349,22 @@ export class ClearingScene implements Scene {
   }
 
   public update(_time: number, dt: number): void {
+    this.sceneTime += dt;
     if (this.toastTimer > 0) {
       this.toastTimer -= dt;
       if (this.toastTimer <= 0) this.toastMessage = '';
+    }
+
+    // [M] Paper-collage map (pauses the woods while open)
+    if (this.app.input.wasPressed('KeyM')) {
+      this.map.toggle();
+      if (this.map.open) this.hud.bagOpen = false;
+      this.app.audio.playLeafStep();
+    }
+    if (this.map.open) {
+      if (this.app.input.wasPressed('Escape')) this.map.open = false;
+      this.app.input.consumeClick();
+      return;
     }
 
     // Global UI hotkeys
@@ -276,15 +462,34 @@ export class ClearingScene implements Scene {
       if (p.life <= 0) this.dust.splice(i, 1);
     }
 
-    // Update drifting canopy autumn leaves
+    // Update drifting canopy autumn leaves (wrapped around the camera view)
     for (const lf of this.fallingLeaves) {
       lf.x += lf.vx * dt;
       lf.y += lf.vy * dt;
       lf.rot += lf.vRot * dt;
-      if (lf.x > this.worldWidth + 60) lf.x = -50;
-      if (lf.y > this.worldHeight + 60) {
-        lf.y = -50;
-        lf.x = Math.random() * this.worldWidth;
+      if (lf.x > this.camX + 900) lf.x -= 1800;
+      if (lf.x < this.camX - 900) lf.x += 1800;
+      if (lf.y > this.camY + 560) {
+        lf.y -= 1120;
+        lf.x = this.camX + (Math.random() - 0.5) * 1800;
+      }
+      if (lf.y < this.camY - 560) lf.y += 1120;
+    }
+
+    // Lift the fog around the acorn — Maple Leaf sees much further from the sky
+    this.fog.reveal(this.player.x, this.player.y, this.sparrow.isFlying ? 640 : 410);
+    for (const lm of LANDMARKS) {
+      if (this.discovered.has(lm.id)) continue;
+      const near = Math.hypot(lm.x - this.player.x, (lm.y - this.player.y) * 1.15) < (this.sparrow.isFlying ? 760 : 620);
+      if (near || this.fog.isRevealed(lm.x, lm.y)) {
+        this.discovered.add(lm.id);
+        // Seeing a landmark reveals the whole of it, not just the edge you walked up to
+        this.fog.reveal(lm.x, lm.y, 380);
+        this.app.audio.playCraftSuccess();
+        const msg = lm.id === 'post' && this.storyFlags.sweetpeaArrived
+          ? "Discovered Sweetpea's Traveling Post! A patchwork wagon is parked in the clearing."
+          : lm.discoverToast;
+        this.showToast(msg + '  (Added to your map [M])', 5.5);
       }
     }
 
@@ -323,25 +528,20 @@ export class ClearingScene implements Scene {
       if (dx < -0.05) this.player.facingLeft = true;
       else if (dx > 0.05) this.player.facingLeft = false;
 
-      let nextX = this.player.x + dx * baseSpeed * dt;
-      let nextY = this.player.y + dy * baseSpeed * dt;
+      const nextX = this.player.x + dx * baseSpeed * dt;
+      const nextY = this.player.y + dy * baseSpeed * dt;
 
-      // Ground walkable clearing bounds (when flying high, can soar freely over roots!)
-      if (!this.sparrow.isFlying) {
-        nextX = Math.max(250, Math.min(1510, nextX));
-        nextY = Math.max(365, Math.min(895, nextY));
-        // Prevent walking straight through the giant upper-right oak trunk unless flying
-        if (nextX > 1130 && nextY < 515) {
-          if (this.player.x <= 1130) nextX = 1130;
-          else nextY = 515;
-        }
-      } else {
-        nextX = Math.max(140, Math.min(this.worldWidth - 140, nextX));
-        nextY = Math.max(180, Math.min(this.worldHeight - 100, nextY));
+      // Solid scenery (oak trunk, lake water, Claud's boot) blocks walking, but
+      // Maple Leaf can soar right over it. Slide along obstacles axis by axis.
+      const flying = this.sparrow.isFlying;
+      if (isWalkable(nextX, nextY, flying)) {
+        this.player.x = nextX;
+        this.player.y = nextY;
+      } else if (isWalkable(nextX, this.player.y, flying)) {
+        this.player.x = nextX;
+      } else if (isWalkable(this.player.x, nextY, flying)) {
+        this.player.y = nextY;
       }
-
-      this.player.x = nextX;
-      this.player.y = nextY;
       this.player.walkPhase += dt * 11;
 
       // Walking leaf-dust particles & soft step rustle when on foot
@@ -471,6 +671,10 @@ export class ClearingScene implements Scene {
       this.app.audio.playWingFlap();
       this.showToast('Soaring above the clearing! Press [Space] again to land.');
     } else {
+      if (!isWalkable(this.player.x, this.player.y, false)) {
+        this.showToast("Can't land here — find solid ground away from the water and big roots!");
+        return;
+      }
       this.sparrow.isFlying = false;
       this.sparrow.targetAltitude = 0;
       this.app.audio.playWingFlap();
@@ -522,10 +726,9 @@ export class ClearingScene implements Scene {
       }
     }
 
-    // 3. Check tiny arched oak root doorway in upper-right clearing
-    if (Math.hypot(this.player.x - 1295, this.player.y - 475) < 115) {
-      this.showToast('Ancient Oak Hollow Door: Sturdy winter housing upgrade (Chapter 2: Winter).');
-    }
+    // 3. Talk / inspect nearby points of interest (Claud, signpost, lake, oak door)
+    const spot = this.findNearestHotspot();
+    if (spot) spot.onInteract();
   }
 
   private eatBerry(): void {
@@ -566,8 +769,12 @@ export class ClearingScene implements Scene {
       return;
     }
 
-    const tentX = Math.max(460, Math.min(1180, this.player.x + (this.player.facingLeft ? -95 : 95)));
-    const tentY = Math.max(450, Math.min(800, this.player.y - 10));
+    let tentX = this.player.x + (this.player.facingLeft ? -95 : 95);
+    let tentY = this.player.y - 10;
+    if (!isWalkable(tentX, tentY, false)) {
+      tentX = this.player.x;
+      tentY = this.player.y - 10;
+    }
 
     this.props.push({
       id: `tent_${Date.now()}`,
@@ -583,9 +790,10 @@ export class ClearingScene implements Scene {
     });
 
     this.tentBuilt = true;
+    this.tentPos = { x: tentX, y: tentY };
     this.spawnLeafDust(tentX, tentY);
     this.app.audio.playCraftSuccess();
-    this.showToast('Leaf-and-Stick Tent pitched in the clearing! Press [E] near it anytime to rest.', 5.0);
+    this.showToast('Leaf-and-Stick Tent pitched! It now marks "Home" on your map. Press [E] near it anytime to rest.', 5.0);
   }
 
   private findNearestInteractable(): WorldProp | null {
@@ -593,7 +801,7 @@ export class ClearingScene implements Scene {
     let bestDist = 98;
 
     for (const p of this.props) {
-      if (p.kind === 'scenery') continue;
+      if (p.kind !== 'forage' && p.kind !== 'tent') continue;
       if (p.kind === 'forage' && p.charges <= 0) continue;
       const d = Math.hypot(p.x - this.player.x, p.y - this.player.y);
       if (d < bestDist) {
@@ -606,12 +814,12 @@ export class ClearingScene implements Scene {
 
   private computeContextPrompt(): string {
     if (this.sparrow.isFlying) {
-      return 'Soaring on Maple Leaf  •  [WASD] Fly Over Canopy  •  [Space] Land';
+      return 'Soaring on Maple Leaf  •  [WASD] Fly Over Canopy  •  [Space] Land  •  [M] Map';
     }
 
     const activeSlot = this.inventory.getActiveSlot();
     if (activeSlot && activeSlot.id === 'tent_kit') {
-      return 'Press [E] to pitch your Leaf-and-Stick Tent here in the clearing!';
+      return 'Press [E] to pitch your Leaf-and-Stick Tent here!';
     }
 
     const near = this.findNearestInteractable();
@@ -631,9 +839,8 @@ export class ClearingScene implements Scene {
       return 'Mounted on Maple Leaf  •  Press [Space] to Take Off  •  [C] Dismount';
     }
 
-    if (Math.hypot(this.player.x - 1295, this.player.y - 475) < 115) {
-      return 'Press [E] to inspect Ancient Oak Root Doorway';
-    }
+    const spot = this.findNearestHotspot();
+    if (spot) return spot.prompt;
 
     return '';
   }
@@ -650,11 +857,10 @@ export class ClearingScene implements Scene {
     ctx.scale(this.camZoom, this.camZoom);
     ctx.translate(-this.camX, -this.camY);
 
-    // 1. Hand-Drawn Watercolor & Cross-Hatched Woodland Clearing Background
-    const bg = this.app.getTexture('clearing_bg');
-    if (bg) {
-      ctx.drawImage(bg, 0, 0, this.worldWidth, this.worldHeight);
-    }
+    // 1. Hand-drawn watercolour zones (feathered together, only visible ones drawn)
+    const halfW = w / 2 / this.camZoom;
+    const halfH = h / 2 / this.camZoom;
+    this.background.render(ctx, this.camX - halfW, this.camY - halfH, this.camX + halfW, this.camY + halfH);
 
     // 2. Ground shadows (always stay on the ground even during high flight!)
     this.renderGroundShadows(ctx);
@@ -678,6 +884,8 @@ export class ClearingScene implements Scene {
 
     for (const prop of this.props) {
       if (prop.kind === 'forage' && prop.charges <= 0) continue;
+      // Skip props well outside the camera view (the world is large now)
+      if (Math.abs(prop.x - this.camX) > halfW + 260 || prop.y < this.camY - halfH - 60 || prop.y - prop.displayHeight > this.camY + halfH + 60) continue;
       drawList.push({
         ySort: prop.y,
         draw: () => this.renderProp(ctx, prop)
@@ -708,18 +916,32 @@ export class ClearingScene implements Scene {
       item.draw();
     }
 
-    // 5. Highlight indicator ring on nearest interactable prop
+    // 5. Highlight indicator ring on nearest interactable prop / point of interest
     const near = this.findNearestInteractable();
     if (near && !this.sparrow.isFlying) {
       this.renderInteractBadge(ctx, near.x, near.y - near.displayHeight - 10, `[E] ${near.kind === 'tent' ? 'Rest' : 'Gather'}`);
+    } else if (!this.sparrow.isFlying) {
+      const spot = this.findNearestHotspot();
+      if (spot) this.renderInteractBadge(ctx, spot.x, spot.y - 130, spot.badge);
     }
 
-    // 6. Drifting golden oak leaves + warm sunlight shafts
+    // 6. Drifting golden oak leaves
     this.renderCanopyAtmosphere(ctx);
 
     ctx.restore();
 
-    // 7. Dual Storybook Parchment HUD & Bag/Crafting Interface
+    // 7. Fog over the undiscovered woods
+    this.fog.renderWorldFog(ctx, this.camX, this.camY, this.camZoom, w, h, this.sceneTime);
+
+    // Warm golden morning sunbeams (screen space)
+    const sunGrad = ctx.createLinearGradient(0, 0, 820, 560);
+    sunGrad.addColorStop(0, 'rgba(255, 224, 150, 0.22)');
+    sunGrad.addColorStop(0.55, 'rgba(255, 205, 120, 0.06)');
+    sunGrad.addColorStop(1, 'rgba(255, 205, 120, 0)');
+    ctx.fillStyle = sunGrad;
+    ctx.fillRect(0, 0, w, h);
+
+    // 8. Dual Storybook Parchment HUD & Bag/Crafting Interface
     this.hud.render(ctx, {
       acornHealth: this.player.health,
       acornMaxHealth: this.player.maxHealth,
@@ -734,6 +956,17 @@ export class ClearingScene implements Scene {
       tentBuilt: this.tentBuilt,
       contextPrompt: this.computeContextPrompt(),
       toastMessage: this.toastMessage
+    });
+
+    // 9. Paper-collage map overlay
+    this.map.render(ctx, {
+      fog: this.fog,
+      playerX: this.player.x,
+      playerY: this.player.y,
+      tent: this.tentPos,
+      discovered: this.discovered,
+      sweetpeaArrived: this.storyFlags.sweetpeaArrived,
+      time: this.sceneTime
     });
   }
 
@@ -922,13 +1155,5 @@ export class ClearingScene implements Scene {
         ctx.restore();
       }
     }
-
-    // Warm golden morning sunbeams from upper-left forest mist
-    const sunGrad = ctx.createLinearGradient(0, 0, 820, 560);
-    sunGrad.addColorStop(0, 'rgba(255, 224, 150, 0.22)');
-    sunGrad.addColorStop(0.55, 'rgba(255, 205, 120, 0.06)');
-    sunGrad.addColorStop(1, 'rgba(255, 205, 120, 0)');
-    ctx.fillStyle = sunGrad;
-    ctx.fillRect(0, 0, this.worldWidth, this.worldHeight);
   }
 }

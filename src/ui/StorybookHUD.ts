@@ -460,9 +460,9 @@ export class StorybookHUD {
     ctx.fillStyle = '#f2e3c6';
     ctx.font = '600 11.5px "Lora", Georgia, serif';
     ctx.textAlign = 'left';
-    ctx.fillText('[WASD] Move   •   [E] Gather / Pitch Tent', x + 12, y + 21);
+    ctx.fillText('[WASD] Move   •   [E] Gather / Talk / Pitch Tent', x + 12, y + 21);
     ctx.fillText('[C] Summon Maple Leaf   •   [Space] Mount & Fly', x + 12, y + 40);
-    ctx.fillText('[R] Eat Berry   •   [F] Feed Seeds   •   [Tab] Bag', x + 12, y + 58);
+    ctx.fillText('[R] Eat   •   [F] Feed Seeds   •   [Tab] Bag   •   [M] Map', x + 12, y + 58);
     ctx.restore();
   }
 
